@@ -3,5 +3,13 @@ bmkg_pipeline:
   outputs:
     dev:
       type: duckdb
-      path: ../../warehouse/bmkg.duckdb
-      threads: 1
+      path: "../../warehouse/bmkg.duckdb"
+      threads: 4
+    prod:
+      type: duckdb
+      path: "../../warehouse/bmkg.duckdb"
+      threads: 4
+    test:
+      type: duckdb
+      path: "../../warehouse/bmkg_test.duckdb"
+      threads: 2
