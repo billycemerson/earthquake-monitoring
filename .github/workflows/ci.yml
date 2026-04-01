@@ -1,49 +1,131 @@
-name: BMKG Earthquake Pipeline
+name: BMKG Earthquake Pipeline v2
 
 on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 * * * *"   # Setiap jam — sesuai SLA: data harus fresh < 2 jam
   workflow_dispatch:
 
+env:
+  PYTHON_VERSION: "3.12"
+  DBT_PROFILES_DIR: dbt_project/profiles
+
 jobs:
-  pipeline:
+  # Job 1: Unit Tests — fast feedback, jalan duluan
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.3"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
       - name: Install dependencies
-        run: pip install duckdb requests dbt-core dbt-duckdb
-      - name: Create warehouse directory
-        run: mkdir -p warehouse
-      - name: Fetch BMKG data
+        run: pip install -r requirements.txt pytest pytest-mock
+      - name: Run unit tests
+        run: pytest tests/ -v --tb=short
+
+  # Job 2: Pipeline — hanya jalan kalau unit-tests lulus
+  pipeline:
+    name: Ingest → Transform → Test → SLA Check
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Create required directories
+        run: mkdir -p warehouse data/bronze
+
+      # ── Ingestion ────────────────────────────────────────────────────────
+      - name: "Step 1/5 — Fetch BMKG → Bronze → DuckDB"
         run: python ingestion/fetch_bmkg.py
-      - name: Run dbt models
+
+      - name: Verify bronze snapshot created
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          FILE="data/bronze/ingestion_date=${TODAY}/earthquakes.json"
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: Bronze file not found: $FILE"
+            exit 1
+          fi
+          echo "Bronze verified: $FILE"
+          python -c "
+          import json
+          with open('$FILE') as f: d = json.load(f)
+          print(f'  ingestion_time : {d[\"ingestion_time\"]}')
+          print(f'  record_count   : {d[\"record_count\"]}')
+          "
+
+      # ── dbt ──────────────────────────────────────────────────────────────
+      - name: "Step 2/5 — dbt deps"
         run: |
           cd dbt_project/bmkg_pipeline
-          dbt run --profiles-dir ../profiles
-      - name: Run dbt tests
+          dbt deps --profiles-dir ../profiles
+
+      - name: "Step 3/5 — dbt run"
         run: |
           cd dbt_project/bmkg_pipeline
-          dbt test --profiles-dir ../profiles
-      - name: Show monitoring summary
+          dbt run --profiles-dir ../profiles --target prod
+
+      - name: "Step 4/5 — dbt test"
         run: |
-          python - <<EOF
-          import duckdb
-          con = duckdb.connect("warehouse/bmkg.duckdb")
-          result = con.execute("SELECT * FROM earthquake_quality_summary").fetchall()
-          for row in result:
-              print(row)
-          EOF
-      - name: Enforce Freshness Guardrail (12h)
+          cd dbt_project/bmkg_pipeline
+          dbt test --profiles-dir ../profiles --target prod
+
+      # ── SLA Gate ─────────────────────────────────────────────────────────
+      - name: "Step 5/5 — Monitoring summary + SLA gate"
         run: |
-          python - <<EOF
-          import duckdb
+          python - <<'PYEOF'
+          import duckdb, sys
           con = duckdb.connect("warehouse/bmkg.duckdb")
-          freshness = con.execute("SELECT freshness_lag_hours FROM earthquake_quality_summary").fetchone()[0]
-          if freshness > 12:
-              raise SystemExit("Freshness guardrail violated (>12 hours).")
-          EOF
+          row = con.execute("""
+              SELECT run_time, total_records, min_magnitude, max_magnitude,
+                     freshness_lag_hours, latest_event_datetime,
+                     invalid_magnitude_count, pipeline_status,
+                     freshness_status, anomaly_status, quality_status
+              FROM earthquake_quality_summary
+          """).fetchone()
+          cols = [d[0] for d in con.description]
+          s = dict(zip(cols, row))
+
+          print()
+          print("=" * 58)
+          print("  BMKG PIPELINE MONITORING SUMMARY")
+          print("=" * 58)
+          for k, v in s.items():
+              icon = " ✓" if str(v) == "OK" else " ⚠" if str(v) == "WARNING" else " ✗" if str(v) == "FAILED" else ""
+              print(f"  {k:<34} {v}{icon}")
+          print("=" * 58)
+
+          if s["freshness_lag_hours"] > 12:
+              print(f"\nFAILED: Freshness SLA violated — {s['freshness_lag_hours']:.2f}h > 12h")
+              sys.exit(1)
+          if s["pipeline_status"] == "WARNING":
+              print("\nWARNING: Pipeline has warnings — review summary above")
+          print("\nSLA gate: PASSED ✓")
+          PYEOF
+
+      # ── Artifacts ────────────────────────────────────────────────────────
+      - name: Upload bronze snapshot (audit trail, 30 hari)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bronze-${{ github.run_id }}-${{ github.run_attempt }}
+          path: data/bronze/
+          retention-days: 30
+
+      - name: Upload dbt docs (7 hari)
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: dbt-docs-${{ github.run_id }}
+          path: dbt_project/bmkg_pipeline/target/
+          retention-days: 7
