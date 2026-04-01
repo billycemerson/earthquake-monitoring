@@ -8,6 +8,7 @@ Upgrade dari v1:
 - Idempotent: run 2x → hasil sama (file di-overwrite, INSERT OR REPLACE)
 """
 
+import sys
 import hashlib
 import json
 import logging
@@ -27,8 +28,13 @@ log = logging.getLogger(__name__)
 
 def fetch_from_api() -> list:
     log.info(f"Fetching: {BMKG_URL}")
-    res = requests.get(BMKG_URL, timeout=30)
-    res.raise_for_status()
+    try:
+        res = requests.get(BMKG_URL, timeout=30)
+        res.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        log.error(f"Error fetching data: {e}")
+        sys.exit(1)
+        
     gempa = res.json().get("Infogempa", {}).get("gempa", [])
     log.info(f"Fetched {len(gempa)} records")
     return gempa
