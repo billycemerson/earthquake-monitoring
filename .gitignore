@@ -1,0 +1,8 @@
+warehouse/
+__pycache__/
+*.pyc
+.env
+dbt_project/bmkg_pipeline/target/
+dbt_project/bmkg_pipeline/dbt_packages/
+dbt_project/profiles/.user.yml
+.DS_Store

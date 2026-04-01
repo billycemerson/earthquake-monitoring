@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: stg_earthquake
+    columns:
+      - name: event_id
+        tests:
+          - unique
+          - not_null
+      - name: magnitude
+        tests:
+          - not_null

@@ -1,0 +1,49 @@
+name: BMKG Earthquake Pipeline
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.3"
+      - name: Install dependencies
+        run: pip install duckdb requests dbt-core dbt-duckdb
+      - name: Create warehouse directory
+        run: mkdir -p warehouse
+      - name: Fetch BMKG data
+        run: python ingestion/fetch_bmkg.py
+      - name: Run dbt models
+        run: |
+          cd dbt_project/bmkg_pipeline
+          dbt run --profiles-dir ../profiles
+      - name: Run dbt tests
+        run: |
+          cd dbt_project/bmkg_pipeline
+          dbt test --profiles-dir ../profiles
+      - name: Show monitoring summary
+        run: |
+          python - <<EOF
+          import duckdb
+          con = duckdb.connect("warehouse/bmkg.duckdb")
+          result = con.execute("SELECT * FROM earthquake_quality_summary").fetchall()
+          for row in result:
+              print(row)
+          EOF
+      - name: Enforce Freshness Guardrail (12h)
+        run: |
+          python - <<EOF
+          import duckdb
+          con = duckdb.connect("warehouse/bmkg.duckdb")
+          freshness = con.execute("SELECT freshness_lag_hours FROM earthquake_quality_summary").fetchone()[0]
+          if freshness > 12:
+              raise SystemExit("Freshness guardrail violated (>12 hours).")
+          EOF

@@ -1,0 +1,7 @@
+bmkg_pipeline:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ../../warehouse/bmkg.duckdb
+      threads: 1
