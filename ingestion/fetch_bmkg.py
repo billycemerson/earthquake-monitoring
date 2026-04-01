@@ -17,7 +17,7 @@ from pathlib import Path
 import duckdb
 import requests
 
-BMKG_URL      = "https://data.bmkg.go.id/DataMKG/TEWS/gempaterkini.json"
+BMKG_URL      = "https://data.bmkg.go.id/DataMKG/TEWS/gempadirasakan.json"
 BRONZE_BASE   = Path("data/bronze")
 WAREHOUSE_PATH = Path("warehouse/bmkg.duckdb")
 
