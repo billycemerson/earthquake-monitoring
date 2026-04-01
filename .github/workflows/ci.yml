@@ -91,7 +91,7 @@ jobs:
                      freshness_lag_hours, latest_event_datetime,
                      invalid_magnitude_count, pipeline_status,
                      freshness_status, anomaly_status, quality_status
-              FROM earthquake_quality_summary
+              FROM monitoring.earthquake_quality_summary
           """).fetchone()
           cols = [d[0] for d in con.description]
           s = dict(zip(cols, row))
