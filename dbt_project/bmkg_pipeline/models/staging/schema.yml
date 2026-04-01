@@ -2,11 +2,54 @@ version: 2
 
 models:
   - name: stg_earthquake
+    description: >
+      Staging layer gempa BMKG. Incremental, deduplicated, dengan kolom
+      turunan seperti lat/lon terpisah dan kategori magnitude/depth.
     columns:
       - name: event_id
+        description: SHA256 hash dari datetime+koordinat (16 char)
         tests:
           - unique
+          - not_null
+      - name: event_datetime
+        tests:
           - not_null
       - name: magnitude
         tests:
           - not_null
+      - name: magnitude_category
+        tests:
+          - accepted_values:
+              values: ['micro','minor','light','moderate','strong','major','great']
+      - name: depth_category
+        tests:
+          - accepted_values:
+              values: ['shallow','intermediate','deep']
+
+  - name: fact_earthquake
+    description: Fact table incremental siap untuk analitik.
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+      - name: event_datetime
+        tests: [not_null]
+      - name: magnitude
+        tests: [not_null]
+
+  - name: earthquake_quality_summary
+    description: Pipeline observability — satu baris per run.
+    columns:
+      - name: pipeline_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['OK','WARNING','FAILED']
+
+sources:
+  - name: raw
+    tables:
+      - name: raw_earthquake
+        freshness:
+          warn_after:  {count: 2,  period: hour}
+          error_after: {count: 12, period: hour}
+        loaded_at_field: ingestion_time
