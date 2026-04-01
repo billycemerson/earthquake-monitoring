@@ -1,0 +1,11 @@
+# Core
+requests>=2.31.0
+duckdb>=0.10.0
+
+# dbt
+dbt-core>=1.7.0
+dbt-duckdb>=1.7.0
+
+# Dev / testing
+pytest>=8.0.0
+pytest-mock>=3.12.0
