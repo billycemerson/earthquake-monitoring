@@ -112,6 +112,52 @@ jobs:
               print("\nWARNING: Pipeline has warnings — review summary above")
           print("\nSLA gate: PASSED ✓")
           PYEOF
+      
+      - name: "Additional Step — Append Staging Data to GSheet"
+        env:
+          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: |
+          python - <<'PYEOF'
+          import duckdb, gspread, os, json
+          from oauth2client.service_account import ServiceAccountCredentials
+
+          # Initialize DuckDB connection
+          con = duckdb.connect("warehouse/bmkg.duckdb")
+          
+          # Fetch processed data from dbt staging layer
+          # Ordered by datetime to ensure chronological order in GSheet
+          query = "SELECT * FROM staging.stg_earthquake ORDER BY event_datetime ASC"
+          df = con.execute(query).df()
+          
+          # Format datetime objects to string for JSON serialization
+          for col in df.select_dtypes(['datetime']).columns:
+              df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+          # Authenticate with Google Sheets API
+          scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+          creds_dict = json.loads(os.environ["GSHEET_CREDENTIALS"])
+          creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+          client = gspread.authorize(creds)
+          sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
+
+          # Deduplication Logic (GSheet vs DuckDB)
+          # We check the first column of the sheet (event_id) to avoid duplicates
+          existing_ids = sheet.col_values(1) 
+          
+          new_rows = []
+          for _, row in df.iterrows():
+              # event_id is the primary key in our staging model
+              if str(row['event_id']) not in existing_ids:
+                  new_rows.append(row.values.tolist())
+
+          # Append data if new records exist
+          if new_rows:
+              sheet.append_rows(new_rows)
+              print(f"Successfully appended {len(new_rows)} new earthquake records.")
+          else:
+              print("No new data found. GSheet is already up to date.")
+          PYEOF
 
       # ── Artifacts ────────────────────────────────────────────────────────
       - name: Upload bronze snapshot (audit trail, 30 hari)
