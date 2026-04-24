@@ -112,7 +112,7 @@ jobs:
               print("\nWARNING: Pipeline has warnings — review summary above")
           print("\nSLA gate: PASSED ✓")
           PYEOF
-      
+
       - name: "Additional Step — Append Staging Data to GSheet"
         env:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -120,19 +120,31 @@ jobs:
         run: |
           python - <<'PYEOF'
           import duckdb, gspread, os, json
+          import pandas as pd
           from oauth2client.service_account import ServiceAccountCredentials
 
           # Initialize DuckDB connection
           con = duckdb.connect("warehouse/bmkg.duckdb")
           
           # Fetch processed data from dbt staging layer
-          # Ordered by datetime to ensure chronological order in GSheet
+          # Ordered by datetime for chronological order
           query = "SELECT * FROM staging.stg_earthquake ORDER BY event_datetime ASC"
           df = con.execute(query).df()
           
-          # Format datetime objects to string for JSON serialization
-          for col in df.select_dtypes(['datetime']).columns:
-              df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+          # Format for JSON serialization (Fixing Timestamp & Boolean error)
+          # Create a copy to prevent SettingWithCopyWarning
+          df_clean = df.copy()
+          
+          for col in df_clean.columns:
+              # Convert Datetime/Timestamp to String
+              if df_clean[col].dtype.kind in ['M', 'm']: 
+                  df_clean[col] = df_clean[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+              # Convert Boolean to String 'TRUE'/'FALSE' (GSheet compatible)
+              elif df_clean[col].dtype.kind == 'b':
+                  df_clean[col] = df_clean[col].astype(str).str.upper()
+              # Convert everything else to string if it's not a basic number
+              elif df_clean[col].dtype == 'object':
+                  df_clean[col] = df_clean[col].astype(str)
 
           # Authenticate with Google Sheets API
           scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -142,12 +154,12 @@ jobs:
           sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
 
           # Deduplication Logic (GSheet vs DuckDB)
-          # We check the first column of the sheet (event_id) to avoid duplicates
+          # event_id is the primary key in our staging model (Column A / Index 0)
           existing_ids = sheet.col_values(1) 
           
           new_rows = []
-          for _, row in df.iterrows():
-              # event_id is the primary key in our staging model
+          for _, row in df_clean.iterrows():
+              # Compare as string to be safe
               if str(row['event_id']) not in existing_ids:
                   new_rows.append(row.values.tolist())
 
@@ -157,6 +169,7 @@ jobs:
               print(f"Successfully appended {len(new_rows)} new earthquake records.")
           else:
               print("No new data found. GSheet is already up to date.")
+          
           PYEOF
 
       # ── Artifacts ────────────────────────────────────────────────────────
