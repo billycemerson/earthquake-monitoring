@@ -7,6 +7,7 @@ names using the reverse_geocoder library.
 
 import logging
 from typing import List, Tuple, Optional, Dict
+import pandas as pd
 
 try:
     import reverse_geocoder as rg
@@ -26,8 +27,32 @@ class ProvinceGeocoder:
     Uses the reverse_geocoder library to batch process coordinates
     and extract province (admin1) information.
     
-    Note: reverse_geocoder returns tuples of (lat, lon, admin1_code, admin1_name, country_code, country_name)
+    Safely handles NA/NaN values and different result structures.
     """
+
+    @staticmethod
+    def _safe_str(value) -> str:
+        """
+        Safely convert any value to string, handling NaN/None/NA types.
+        
+        Returns:
+            Clean string or 'Unknown' if value is null-like
+        """
+        if value is None:
+            return 'Unknown'
+        
+        # Handle pandas NA/NaN types
+        if pd.isna(value):
+            return 'Unknown'
+        
+        # Convert to string and clean
+        str_val = str(value).strip()
+        
+        # Filter out common null representations
+        if str_val.lower() in ('nan', 'none', 'null', ''):
+            return 'Unknown'
+        
+        return str_val
 
     @staticmethod
     def geocode_batch(coordinates: List[Tuple[float, float]]) -> List[str]:
@@ -41,28 +66,74 @@ class ProvinceGeocoder:
             List of province names corresponding to each coordinate
             
         Raises:
-            ValueError: If coordinates list is empty or invalid
+            ValueError: If coordinates list is empty
         """
         if not coordinates:
             raise ValueError("Coordinates list cannot be empty")
 
         try:
-            # reverse_geocoder.search returns list of tuples:
-            # (lat, lon, admin1_code, admin1_name, country_code, country_name)
+            # Call reverse_geocoder
             results = rg.search(coordinates)
             
-            # Extract admin1_name (province) from each result tuple
-            # Index 3 is the admin1_name (province name)
-            provinces = [
-                result[3] if len(result) > 3 and result[3] else 'Unknown' 
-                for result in results
-            ]
+            provinces = []
+            for result in results:
+                province = ProvinceGeocoder._extract_province(result)
+                provinces.append(province)
             
             log.info(f"Successfully geocoded {len(provinces)} coordinates")
             return provinces
+            
         except Exception as e:
             log.error(f"Error during geocoding: {type(e).__name__}: {e}")
             raise
+
+    @staticmethod
+    def _extract_province(result) -> str:
+        """
+        Extract province from reverse_geocoder result.
+        
+        Handles different possible return formats and NA values.
+        
+        Args:
+            result: A single result from rg.search()
+            
+        Returns:
+            Province name as string, or 'Unknown' if not found
+        """
+        if not isinstance(result, (list, tuple)):
+            return ProvinceGeocoder._safe_str(result)
+        
+        if len(result) == 0:
+            return 'Unknown'
+        
+        # Try common indices for admin1_name (province)
+        # reverse_geocoder typically: (lat, lon, admin1_code, admin1_name, country_code, country_name)
+        candidates = []
+        
+        # Index 3: Most common for admin1_name
+        if len(result) > 3:
+            candidates.append(result[3])
+        
+        # Index 1: Sometimes province is here
+        if len(result) > 1:
+            candidates.append(result[1])
+        
+        # Index 2: Try admin1_code as fallback
+        if len(result) > 2:
+            candidates.append(result[2])
+        
+        # Try any other string elements
+        for item in result:
+            if isinstance(item, str):
+                candidates.append(item)
+        
+        # Return first non-null candidate
+        for candidate in candidates:
+            province = ProvinceGeocoder._safe_str(candidate)
+            if province != 'Unknown':
+                return province
+        
+        return 'Unknown'
 
     @staticmethod
     def geocode_single(latitude: float, longitude: float) -> str:
@@ -74,14 +145,13 @@ class ProvinceGeocoder:
             longitude: Longitude coordinate
             
         Returns:
-            Province name
+            Province name (or 'Unknown' if geocoding fails)
         """
         try:
-            # reverse_geocoder returns tuple: (lat, lon, admin1_code, admin1_name, country_code, country_name)
             result = rg.search([(latitude, longitude)])
             if result and len(result) > 0:
-                admin1_name = result[0][3] if len(result[0]) > 3 else 'Unknown'
-                return admin1_name if admin1_name else 'Unknown'
+                province = ProvinceGeocoder._extract_province(result[0])
+                return province
             return 'Unknown'
         except Exception as e:
             log.error(f"Error geocoding ({latitude}, {longitude}): {type(e).__name__}: {e}")
@@ -106,6 +176,10 @@ class ProvinceGeocoder:
             return False
         
         try:
+            # Handle pandas NA
+            if pd.isna(latitude) or pd.isna(longitude):
+                return False
+            
             lat = float(latitude)
             lon = float(longitude)
             return -90 <= lat <= 90 and -180 <= lon <= 180
