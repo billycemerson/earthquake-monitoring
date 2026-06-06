@@ -1,27 +1,39 @@
--- Staging model for earthquake data
+-- Staging layer for earthquake data
 -- Applies deduplication, coordinate parsing, and enrichment
 
 {{ config(
     materialized='incremental',
-    unique_key=['event_id']
+    unique_key=['event_id'],
+    on_schema_change='sync_all_columns'
 ) }}
 
-WITH raw_data AS (
-    SELECT *
-    FROM {{ source('raw', 'raw_earthquake') }}
-    
-    {% if execute %}
-        {% if var('start_time', False) %}
-            WHERE ingestion_time > '{{ var("start_time") }}'
-        {% endif %}
+WITH source AS (
+
+    SELECT * 
+    FROM raw_earthquake
+
+    {% if is_incremental() %}
+    WHERE ingestion_time > (SELECT MAX(ingestion_time) FROM {{ this }})
     {% endif %}
+
 ),
 
 -- Deduplicate by event_id, keep most recent
 deduplicated AS (
     SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY event_id 
+            ORDER BY ingestion_time DESC
+        ) AS rn
+    FROM source
+),
+
+-- Parse coordinates and add enrichment columns
+cleaned AS (
+    SELECT
         event_id,
-        datetime,
+        CAST(datetime AS TIMESTAMPTZ) AS event_datetime,
         coordinates,
         magnitude,
         depth_km,
@@ -30,67 +42,45 @@ deduplicated AS (
         ingestion_time,
         ingestion_date,
         source_file,
-        ROW_NUMBER() OVER (
-            PARTITION BY event_id 
-            ORDER BY ingestion_time DESC
-        ) AS rn
-    FROM raw_data
-    WHERE rn = 1
-),
 
--- Parse coordinates into latitude and longitude
-coordinates_parsed AS (
-    SELECT
-        event_id,
-        datetime AS event_datetime,
-        coordinates,
+        -- Parse coordinates into separate latitude and longitude
         TRY_CAST(
             SPLIT_PART(coordinates, ',', 1) AS DOUBLE
         ) AS latitude,
         TRY_CAST(
             TRIM(SPLIT_PART(coordinates, ',', 2)) AS DOUBLE
         ) AS longitude,
-        magnitude,
+
+        -- Magnitude categorization
         CASE 
-            WHEN magnitude < 3 THEN 'Low'
-            WHEN magnitude < 5 THEN 'Moderate'
-            WHEN magnitude < 6 THEN 'Strong'
-            ELSE 'Major'
+            WHEN magnitude < 3.0 THEN 'Micro'
+            WHEN magnitude < 4.0 THEN 'Minor'
+            WHEN magnitude < 5.0 THEN 'Light'
+            WHEN magnitude < 6.0 THEN 'Moderate'
+            WHEN magnitude < 7.0 THEN 'Strong'
+            WHEN magnitude < 8.0 THEN 'Major'
+            ELSE 'Great'
         END AS magnitude_category,
-        depth_km,
+
+        -- Depth categorization
         CASE
             WHEN depth_km < 70 THEN 'Shallow'
             WHEN depth_km < 300 THEN 'Intermediate'
             ELSE 'Deep'
         END AS depth_category,
-        wilayah,
-        dirasakan,
-        ingestion_time,
-        ingestion_date,
-        source_file
-    FROM deduplicated
-),
 
--- Add province column (populated by Python enrichment)
-enriched AS (
-    SELECT
-        event_id,
-        event_datetime,
-        coordinates,
-        latitude,
-        longitude,
-        magnitude,
-        magnitude_category,
-        depth_km,
-        depth_category,
-        wilayah,
-        dirasakan,
+        -- Validation flags
+        (magnitude BETWEEN 0 AND 10) AS magnitude_valid,
+        (depth_km > 0) AS depth_valid,
+
+        -- Province column (populated by Python enrichment)
         NULL AS province,
-        ingestion_time,
-        ingestion_date,
-        source_file,
+
+        -- Load timestamp
         CURRENT_TIMESTAMP() AS dbt_loaded_at
-    FROM coordinates_parsed
+
+    FROM deduplicated
+    WHERE rn = 1
 )
 
-SELECT * FROM enriched
+SELECT * FROM cleaned
