@@ -43,7 +43,7 @@ class DuckDBEnricher:
         con = duckdb.connect(str(self.warehouse_path))
         try:
             con.execute("""
-                ALTER TABLE stg_earthquake 
+                ALTER TABLE staging.stg_earthquake 
                 ADD COLUMN IF NOT EXISTS province VARCHAR
             """)
             log.info("Province column ensured in stg_earthquake")
@@ -112,7 +112,7 @@ class DuckDBEnricher:
         try:
             con.executemany(
                 """
-                UPDATE stg_earthquake 
+                UPDATE staging.stg_earthquake 
                 SET province = ? 
                 WHERE event_id = ?
                 """,
