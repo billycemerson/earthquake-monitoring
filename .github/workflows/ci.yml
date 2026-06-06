@@ -80,6 +80,10 @@ jobs:
           cd dbt_project/bmkg_pipeline
           dbt test --profiles-dir ../profiles --target prod
 
+      - name: "Step 4.5/5 — Province Enrichment"
+        run: |
+          python ingestion/enrich.py --pipeline
+
       # ── SLA Gate ─────────────────────────────────────────────────────────
       - name: "Step 5/5 — Monitoring summary + SLA gate"
         run: |
@@ -113,64 +117,84 @@ jobs:
           print("\nSLA gate: PASSED ✓")
           PYEOF
 
-      - name: "Additional Step — Append Staging Data to GSheet"
-        env:
-          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-        run: |
-          python - <<'PYEOF'
-          import duckdb, gspread, os, json
-          import pandas as pd
-          from oauth2client.service_account import ServiceAccountCredentials
+# Update the "Additional Step — Append Staging Data to GSheet"
 
-          # Initialize DuckDB connection
-          con = duckdb.connect("warehouse/bmkg.duckdb")
-          
-          # Fetch processed data from dbt staging layer
-          # Ordered by datetime for chronological order
-          query = "SELECT * FROM staging.stg_earthquake ORDER BY event_datetime ASC"
-          df = con.execute(query).df()
-          
-          # Format for JSON serialization (Fixing Timestamp & Boolean error)
-          # Create a copy to prevent SettingWithCopyWarning
-          df_clean = df.copy()
-          
-          for col in df_clean.columns:
-              # Convert Datetime/Timestamp to String
-              if df_clean[col].dtype.kind in ['M', 'm']: 
-                  df_clean[col] = df_clean[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-              # Convert Boolean to String 'TRUE'/'FALSE' (GSheet compatible)
-              elif df_clean[col].dtype.kind == 'b':
-                  df_clean[col] = df_clean[col].astype(str).str.upper()
-              # Convert everything else to string if it's not a basic number
-              elif df_clean[col].dtype == 'object':
-                  df_clean[col] = df_clean[col].astype(str)
+      - name: "Additional Step — Append Enriched Data to GSheet"
+      env:
+        GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      run: |
+        python - <<'PYEOF'
+        import duckdb, gspread, os, json
+        import pandas as pd
+        from oauth2client.service_account import ServiceAccountCredentials
 
-          # Authenticate with Google Sheets API
-          scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-          creds_dict = json.loads(os.environ["GSHEET_CREDENTIALS"])
-          creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-          client = gspread.authorize(creds)
-          sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
+        # Initialize DuckDB connection
+        con = duckdb.connect("warehouse/bmkg.duckdb")
+        
+        # Fetch enriched data from staging layer with province
+        query = """
+          SELECT 
+            event_id,
+            event_datetime,
+            latitude,
+            longitude,
+            magnitude,
+            magnitude_category,
+            depth_km,
+            depth_category,
+            wilayah,
+            dirasakan,
+            province,
+            ingestion_date
+          FROM stg_earthquake 
+          ORDER BY event_datetime DESC
+        """
+        df = con.execute(query).df()
+        
+        # Format for JSON serialization
+        df_clean = df.copy()
+        
+        for col in df_clean.columns:
+            # Convert Datetime/Timestamp to String
+            if df_clean[col].dtype.kind in ['M', 'm']: 
+                df_clean[col] = df_clean[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            # Convert Boolean to String
+            elif df_clean[col].dtype.kind == 'b':
+                df_clean[col] = df_clean[col].astype(str).str.upper()
+            # Convert to string
+            elif df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].astype(str)
 
-          # Deduplication Logic (GSheet vs DuckDB)
-          # event_id is the primary key in our staging model (Column A / Index 0)
-          existing_ids = sheet.col_values(1) 
-          
-          new_rows = []
-          for _, row in df_clean.iterrows():
-              # Compare as string to be safe
-              if str(row['event_id']) not in existing_ids:
-                  new_rows.append(row.values.tolist())
+        # Authenticate with Google Sheets API
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(os.environ["GSHEET_CREDENTIALS"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
 
-          # Append data if new records exist
-          if new_rows:
-              sheet.append_rows(new_rows)
-              print(f"Successfully appended {len(new_rows)} new earthquake records.")
-          else:
-              print("No new data found. GSheet is already up to date.")
-          
-          PYEOF
+        # Deduplication: event_id is primary key
+        existing_ids = sheet.col_values(1)
+        
+        new_rows = []
+        for _, row in df_clean.iterrows():
+            if str(row['event_id']) not in existing_ids:
+                new_rows.append(row.values.tolist())
+
+        # Append enriched data
+        if new_rows:
+            sheet.append_rows(new_rows)
+            print(f"Successfully appended {len(new_rows)} enriched earthquake records.")
+            
+            # Log enrichment statistics
+            enriched_count = len(df_clean[df_clean['province'].notna()])
+            total_count = len(df_clean)
+            enrichment_pct = (enriched_count / total_count * 100) if total_count > 0 else 0
+            print(f"Province enrichment: {enriched_count}/{total_count} ({enrichment_pct:.1f}%)")
+        else:
+            print("No new data found. GSheet is already up to date.")
+        
+        PYEOF
 
       # ── Artifacts ────────────────────────────────────────────────────────
       - name: Upload bronze snapshot (audit trail, 30 hari)
