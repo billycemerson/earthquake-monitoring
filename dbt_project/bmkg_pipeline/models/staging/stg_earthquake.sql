@@ -77,7 +77,7 @@ cleaned AS (
         NULL AS province,
 
         -- Load timestamp
-        CURRENT_TIMESTAMP() AS dbt_loaded_at
+        {{ current_timestamp() }} AS dbt_loaded_at
 
     FROM deduplicated
     WHERE rn = 1
