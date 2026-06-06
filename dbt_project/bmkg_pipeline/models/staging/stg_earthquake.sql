@@ -74,7 +74,7 @@ cleaned AS (
         (depth_km > 0) AS depth_valid,
 
         -- Province column (populated by Python enrichment)
-        NULL AS province,
+        NULL::VARCHAR AS province,
 
         -- Load timestamp
         {{ current_timestamp() }} AS dbt_loaded_at
