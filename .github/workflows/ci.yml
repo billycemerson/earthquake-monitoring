@@ -188,23 +188,32 @@ jobs:
           creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
           client = gspread.authorize(creds)
           sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
+          # Enforce fixed column order — must match GSheet header exactly
+          COLUMN_ORDER = [
+              'event_id', 'event_datetime', 'latitude', 'longitude',
+              'magnitude', 'magnitude_category', 'depth_km', 'depth_category',
+              'wilayah', 'dirasakan', 'province', 'ingestion_date'
+          ]
+          df_clean = df_clean[COLUMN_ORDER]
+
+          # Write header if sheet is empty
+          existing_ids = sheet.col_values(1)
+          if not existing_ids:
+              sheet.append_row(COLUMN_ORDER)
+              existing_ids = []
+
           # Deduplication: event_id is primary key (Column A)
-          existing_ids = sheet.col_values(1) 
-          
           new_rows = []
           for _, row in df_clean.iterrows():
               if str(row['event_id']) not in existing_ids:
                   new_rows.append(row.values.tolist())
+
           # Append enriched data
           if new_rows:
               sheet.append_rows(new_rows)
               print(f"Successfully appended {len(new_rows)} enriched earthquake records.")
-              
-              # Log enrichment metrics
-              enriched_count = len(df_clean[df_clean['province'].notna()])
-              total_count = len(df_clean)
-              enrichment_pct = (enriched_count / total_count * 100) if total_count > 0 else 0
-              print(f"Province enrichment: {enriched_count}/{total_count} ({enrichment_pct:.1f}%)")
+              enriched_count = sum(1 for r in new_rows if r[10] not in (None, '', 'None'))
+              print(f"Province enrichment: {enriched_count}/{len(new_rows)} new rows have province")
           else:
               print("No new data found. Google Sheet is already up to date.")
           
