@@ -63,37 +63,32 @@ jobs:
           print(f'  ingestion_time : {d[\"ingestion_time\"]}')
           print(f'  record_count   : {d[\"record_count\"]}')
           "
-
       # ── dbt ───────────────────────────────────────────────────────────
       - name: "Step 2/6 — dbt deps"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt deps --profiles-dir ../profiles
-
       - name: "Step 3/6 — dbt run"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt run --profiles-dir ../profiles --target prod
-
       - name: "Step 4/6 — dbt test"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt test --profiles-dir ../profiles --target prod
-
       # ── Province Enrichment ──────────────────────────────────────────
       - name: "Step 5/6 — Province Enrichment (Reverse Geocoding)"
         run: |
           python ingestion/enrich.py --pipeline
-
       - name: Log enrichment statistics
         run: |
           python - <<'PYEOF'
           import duckdb
           con = duckdb.connect("warehouse/bmkg.duckdb")
           
-          total = con.execute("SELECT COUNT(*) FROM stg_earthquake").fetchone()[0]
+          total = con.execute("SELECT COUNT(*) FROM staging.stg_earthquake").fetchone()[0]
           enriched = con.execute(
-              "SELECT COUNT(*) FROM stg_earthquake WHERE province IS NOT NULL AND province != ''"
+              "SELECT COUNT(*) FROM staging.stg_earthquake WHERE province IS NOT NULL AND province != ''"
           ).fetchone()[0]
           
           pending = total - enriched
@@ -110,7 +105,6 @@ jobs:
           print("=" * 50)
           print()
           PYEOF
-
       # ── SLA Gate ─────────────────────────────────────────────────────────
       - name: "Step 6/6 — Monitoring Summary + SLA Gate"
         run: |
@@ -126,7 +120,6 @@ jobs:
           """).fetchone()
           cols = [d[0] for d in con.description]
           s = dict(zip(cols, row))
-
           print()
           print("=" * 58)
           print("  BMKG PIPELINE MONITORING SUMMARY")
@@ -135,7 +128,6 @@ jobs:
               icon = " OK" if str(v) == "OK" else " WARNING" if str(v) == "WARNING" else " FAILED" if str(v) == "FAILED" else ""
               print(f"  {k:<34} {v}{icon}")
           print("=" * 58)
-
           if s["freshness_lag_hours"] > 12:
               print(f"\nFAILED: Freshness SLA violated — {s['freshness_lag_hours']:.2f}h > 12h")
               sys.exit(1)
@@ -143,7 +135,6 @@ jobs:
               print("\nWARNING: Pipeline has warnings — review summary above")
           print("\nSLA gate: PASSED")
           PYEOF
-
       # ── Google Sheets Export ──────────────────────────────────────────
       - name: "Export — Append Enriched Data to Google Sheet"
         env:
@@ -154,7 +145,6 @@ jobs:
           import duckdb, gspread, os, json
           import pandas as pd
           from oauth2client.service_account import ServiceAccountCredentials
-
           # Initialize DuckDB connection
           con = duckdb.connect("warehouse/bmkg.duckdb")
           
@@ -173,7 +163,7 @@ jobs:
               dirasakan,
               province,
               ingestion_date
-            FROM stg_earthquake 
+            FROM staging.stg_earthquake
             ORDER BY event_datetime DESC
           """
           df = con.execute(query).df()
@@ -192,14 +182,12 @@ jobs:
               # Convert everything else to string
               elif df_clean[col].dtype == 'object':
                   df_clean[col] = df_clean[col].astype(str)
-
           # Authenticate with Google Sheets API
           scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
           creds_dict = json.loads(os.environ["GSHEET_CREDENTIALS"])
           creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
           client = gspread.authorize(creds)
           sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
-
           # Deduplication: event_id is primary key (Column A)
           existing_ids = sheet.col_values(1) 
           
@@ -207,7 +195,6 @@ jobs:
           for _, row in df_clean.iterrows():
               if str(row['event_id']) not in existing_ids:
                   new_rows.append(row.values.tolist())
-
           # Append enriched data
           if new_rows:
               sheet.append_rows(new_rows)
@@ -222,7 +209,6 @@ jobs:
               print("No new data found. Google Sheet is already up to date.")
           
           PYEOF
-
       # ── Artifacts ────────────────────────────────────────────────────────
       - name: Upload bronze snapshot (audit trail, 30 days)
         uses: actions/upload-artifact@v4

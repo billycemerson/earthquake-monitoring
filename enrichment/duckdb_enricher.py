@@ -63,7 +63,7 @@ class DuckDBEnricher:
         try:
             rows = con.execute("""
                 SELECT event_id, latitude, longitude
-                FROM stg_earthquake
+                FROM staging.stg_earthquake
                 WHERE (province IS NULL OR province = '')
                 AND latitude IS NOT NULL 
                 AND longitude IS NOT NULL
@@ -136,11 +136,11 @@ class DuckDBEnricher:
         con = duckdb.connect(str(self.warehouse_path))
         try:
             total = con.execute(
-                "SELECT COUNT(*) FROM stg_earthquake"
+                "SELECT COUNT(*) FROM staging.stg_earthquake"
             ).fetchone()[0]
             
             enriched = con.execute(
-                "SELECT COUNT(*) FROM stg_earthquake WHERE province IS NOT NULL AND province != ''"
+                "SELECT COUNT(*) FROM staging.stg_earthquake WHERE province IS NOT NULL AND province != ''"
             ).fetchone()[0]
             
             pending = total - enriched
