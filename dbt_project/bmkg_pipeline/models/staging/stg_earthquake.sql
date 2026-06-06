@@ -1,50 +1,27 @@
-{{
-  config(
+-- Staging model for earthquake data
+-- Applies deduplication, coordinate parsing, and enrichment
+
+{{ config(
     materialized='incremental',
-    unique_key='event_id',
-    on_schema_change='sync_all_columns'
-  )
-}}
+    unique_key=['event_id']
+) }}
 
-/*
-  stg_earthquake — Staging layer dengan deduplication & incremental load
-
-  Upgrade vs v1:
-  - Incremental: hanya proses record baru (berdasarkan ingestion_time)
-  - Deduplication: ROW_NUMBER() untuk handle duplicate dari API
-  - Parse koordinat → lat/lon terpisah
-  - Tambah magnitude_category dan depth_category
-  - Flag validasi: magnitude_valid, depth_valid
-*/
-
-with source as (
-
-    select * from raw_earthquake
-
-    {% if is_incremental() %}
-    where ingestion_time > (select max(ingestion_time) from {{ this }})
+WITH raw_data AS (
+    SELECT *
+    FROM {{ source('raw', 'raw_earthquake') }}
+    
+    {% if execute %}
+        {% if var('start_time', False) %}
+            WHERE ingestion_time > '{{ var("start_time") }}'
+        {% endif %}
     {% endif %}
-
 ),
 
-deduped as (
-
-    select
-        *,
-        row_number() over (
-            partition by event_id
-            order by ingestion_time desc
-        ) as row_num
-
-    from source
-
-),
-
-cleaned as (
-
-    select
+-- Deduplicate by event_id, keep most recent
+deduplicated AS (
+    SELECT
         event_id,
-        cast(datetime as timestamptz)                        as event_datetime,
+        datetime,
         coordinates,
         magnitude,
         depth_km,
@@ -53,36 +30,67 @@ cleaned as (
         ingestion_time,
         ingestion_date,
         source_file,
+        ROW_NUMBER() OVER (
+            PARTITION BY event_id 
+            ORDER BY ingestion_time DESC
+        ) AS rn
+    FROM raw_data
+    WHERE rn = 1
+),
 
-        -- Parse koordinat jadi lat/lon terpisah
-        try_cast(split_part(coordinates, ',', 1) as double)  as latitude,
-        try_cast(split_part(coordinates, ',', 2) as double)  as longitude,
+-- Parse coordinates into latitude and longitude
+coordinates_parsed AS (
+    SELECT
+        event_id,
+        datetime AS event_datetime,
+        coordinates,
+        TRY_CAST(
+            SPLIT_PART(coordinates, ',', 1) AS DOUBLE
+        ) AS latitude,
+        TRY_CAST(
+            TRIM(SPLIT_PART(coordinates, ',', 2)) AS DOUBLE
+        ) AS longitude,
+        magnitude,
+        CASE 
+            WHEN magnitude < 3 THEN 'Low'
+            WHEN magnitude < 5 THEN 'Moderate'
+            WHEN magnitude < 6 THEN 'Strong'
+            ELSE 'Major'
+        END AS magnitude_category,
+        depth_km,
+        CASE
+            WHEN depth_km < 70 THEN 'Shallow'
+            WHEN depth_km < 300 THEN 'Intermediate'
+            ELSE 'Deep'
+        END AS depth_category,
+        wilayah,
+        dirasakan,
+        ingestion_time,
+        ingestion_date,
+        source_file
+    FROM deduplicated
+),
 
-        -- Kategorisasi magnitude (skala Richter)
-        case
-            when magnitude < 3.0 then 'micro'
-            when magnitude < 4.0 then 'minor'
-            when magnitude < 5.0 then 'light'
-            when magnitude < 6.0 then 'moderate'
-            when magnitude < 7.0 then 'strong'
-            when magnitude < 8.0 then 'major'
-            else                      'great'
-        end as magnitude_category,
-
-        -- Kategorisasi kedalaman
-        case
-            when depth_km < 70  then 'shallow'
-            when depth_km < 300 then 'intermediate'
-            else                     'deep'
-        end as depth_category,
-
-        -- Validasi range — di-flag, bukan di-drop
-        magnitude between 0 and 10  as magnitude_valid,
-        depth_km > 0                as depth_valid
-
-    from deduped
-    where row_num = 1   -- Hanya keep row pertama per event_id (dedup)
-
+-- Add province column (populated by Python enrichment)
+enriched AS (
+    SELECT
+        event_id,
+        event_datetime,
+        coordinates,
+        latitude,
+        longitude,
+        magnitude,
+        magnitude_category,
+        depth_km,
+        depth_category,
+        wilayah,
+        dirasakan,
+        NULL AS province,
+        ingestion_time,
+        ingestion_date,
+        source_file,
+        CURRENT_TIMESTAMP() AS dbt_loaded_at
+    FROM coordinates_parsed
 )
 
-select * from cleaned
+SELECT * FROM enriched

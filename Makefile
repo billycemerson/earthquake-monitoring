@@ -1,4 +1,4 @@
-.PHONY: help install fetch backfill dbt-deps dbt-run dbt-test dbt-docs pipeline test bronze-ls status clean
+.PHONY: help install fetch backfill dbt-deps dbt-run dbt-test dbt-docs pipeline test bronze-ls enrich status clean
 
 PROFILES_DIR = ../profiles
 DBT_DIR      = dbt_project/bmkg_pipeline
@@ -14,7 +14,9 @@ help:
 	@printf "  make dbt-run             Jalankan semua dbt models\n"
 	@printf "  make dbt-test            Jalankan dbt tests\n"
 	@printf "  make dbt-docs            Generate & serve dbt docs\n"
-	@printf "  make pipeline            Full: fetch + dbt-run + dbt-test\n"
+	@printf "  make enrich              Enrich data with province information\n"
+	@printf "  make enrich-sheet SHEET_ID=<id> Add province to Google Sheet\n"
+	@printf "  make pipeline            Full: fetch + dbt-run + enrich + dbt-test\n"
 	@printf "  make test                Unit tests (pytest)\n"
 	@printf "  make bronze-ls           List semua bronze snapshots\n"
 	@printf "  make status              Lihat monitoring summary\n"
@@ -46,8 +48,18 @@ dbt-docs: dbt-deps
 	cd $(DBT_DIR) && dbt docs generate --profiles-dir $(PROFILES_DIR)
 	cd $(DBT_DIR) && dbt docs serve --port 8080 --profiles-dir $(PROFILES_DIR)
 
-pipeline: fetch dbt-run dbt-test
-	@printf "\nPipeline complete ✓\n"
+enrich:
+	python ingestion/enrich.py --pipeline
+
+enrich-sheet:
+	@if [ -z "$(SHEET_ID)" ]; then \
+		echo "Error: SHEET_ID required. Usage: make enrich-sheet SHEET_ID=<google-sheet-id>"; \
+		exit 1; \
+	fi
+	python ingestion/enrich.py --sheet $(SHEET_ID) --sheet-name staging_data
+
+pipeline: fetch dbt-run enrich dbt-test
+	@printf "\nPipeline complete\n"
 
 test:
 	pytest tests/ -v
@@ -78,6 +90,7 @@ status:
 	    print(f"  freshness_status  : {row[5]}")
 	    print(f"  anomaly_status    : {row[6]}")
 	    print(f"  quality_status    : {row[7]}\n")
+	    con.close()
 	except Exception as e:
 	    print(f"  Error: {e} — jalankan 'make pipeline' dulu.\n")
 	PYEOF

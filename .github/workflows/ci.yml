@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 * * * *"   # Setiap jam — sesuai SLA: data harus fresh < 2 jam
+    - cron: "0 * * * *"   # Every hour - SLA: data must be fresh < 2 hours
   workflow_dispatch:
 
 env:
@@ -12,7 +12,7 @@ env:
   DBT_PROFILES_DIR: dbt_project/profiles
 
 jobs:
-  # Job 1: Unit Tests — fast feedback, jalan duluan
+  # Job 1: Unit Tests — fast feedback, runs first
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -27,9 +27,9 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ -v --tb=short
 
-  # Job 2: Pipeline — hanya jalan kalau unit-tests lulus
+  # Job 2: Pipeline — only runs if unit-tests passes
   pipeline:
-    name: Ingest → Transform → Test → SLA Check
+    name: Ingest → Transform → Enrich → Test → SLA Check
     runs-on: ubuntu-latest
     needs: unit-tests
 
@@ -45,7 +45,7 @@ jobs:
         run: mkdir -p warehouse data/bronze
 
       # ── Ingestion ────────────────────────────────────────────────────────
-      - name: "Step 1/5 — Fetch BMKG → Bronze → DuckDB"
+      - name: "Step 1/6 — Fetch BMKG API → Bronze → DuckDB"
         run: python ingestion/fetch_bmkg.py
 
       - name: Verify bronze snapshot created
@@ -64,24 +64,55 @@ jobs:
           print(f'  record_count   : {d[\"record_count\"]}')
           "
 
-      # ── dbt ──────────────────────────────────────────────────────────────
-      - name: "Step 2/5 — dbt deps"
+      # ── dbt ───────────────────────────────────────────────────────────
+      - name: "Step 2/6 — dbt deps"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt deps --profiles-dir ../profiles
 
-      - name: "Step 3/5 — dbt run"
+      - name: "Step 3/6 — dbt run"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt run --profiles-dir ../profiles --target prod
 
-      - name: "Step 4/5 — dbt test"
+      - name: "Step 4/6 — dbt test"
         run: |
           cd dbt_project/bmkg_pipeline
           dbt test --profiles-dir ../profiles --target prod
 
+      # ── Province Enrichment ──────────────────────────────────────────
+      - name: "Step 5/6 — Province Enrichment (Reverse Geocoding)"
+        run: |
+          python ingestion/enrich.py --pipeline
+
+      - name: Log enrichment statistics
+        run: |
+          python - <<'PYEOF'
+          import duckdb
+          con = duckdb.connect("warehouse/bmkg.duckdb")
+          
+          total = con.execute("SELECT COUNT(*) FROM stg_earthquake").fetchone()[0]
+          enriched = con.execute(
+              "SELECT COUNT(*) FROM stg_earthquake WHERE province IS NOT NULL AND province != ''"
+          ).fetchone()[0]
+          
+          pending = total - enriched
+          pct = (enriched / total * 100) if total > 0 else 0
+          
+          print()
+          print("=" * 50)
+          print("  PROVINCE ENRICHMENT STATISTICS")
+          print("=" * 50)
+          print(f"  Total records     : {total}")
+          print(f"  Enriched          : {enriched}")
+          print(f"  Pending           : {pending}")
+          print(f"  Enrichment %      : {pct:.1f}%")
+          print("=" * 50)
+          print()
+          PYEOF
+
       # ── SLA Gate ─────────────────────────────────────────────────────────
-      - name: "Step 5/5 — Monitoring summary + SLA gate"
+      - name: "Step 6/6 — Monitoring Summary + SLA Gate"
         run: |
           python - <<'PYEOF'
           import duckdb, sys
@@ -101,7 +132,7 @@ jobs:
           print("  BMKG PIPELINE MONITORING SUMMARY")
           print("=" * 58)
           for k, v in s.items():
-              icon = " ✓" if str(v) == "OK" else " ⚠" if str(v) == "WARNING" else " ✗" if str(v) == "FAILED" else ""
+              icon = " OK" if str(v) == "OK" else " WARNING" if str(v) == "WARNING" else " FAILED" if str(v) == "FAILED" else ""
               print(f"  {k:<34} {v}{icon}")
           print("=" * 58)
 
@@ -110,10 +141,11 @@ jobs:
               sys.exit(1)
           if s["pipeline_status"] == "WARNING":
               print("\nWARNING: Pipeline has warnings — review summary above")
-          print("\nSLA gate: PASSED ✓")
+          print("\nSLA gate: PASSED")
           PYEOF
 
-      - name: "Additional Step — Append Staging Data to GSheet"
+      # ── Google Sheets Export ──────────────────────────────────────────
+      - name: "Export — Append Enriched Data to Google Sheet"
         env:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
@@ -126,23 +158,38 @@ jobs:
           # Initialize DuckDB connection
           con = duckdb.connect("warehouse/bmkg.duckdb")
           
-          # Fetch processed data from dbt staging layer
-          # Ordered by datetime for chronological order
-          query = "SELECT * FROM staging.stg_earthquake ORDER BY event_datetime ASC"
+          # Fetch enriched data from staging layer with province column
+          query = """
+            SELECT 
+              event_id,
+              event_datetime,
+              latitude,
+              longitude,
+              magnitude,
+              magnitude_category,
+              depth_km,
+              depth_category,
+              wilayah,
+              dirasakan,
+              province,
+              ingestion_date
+            FROM stg_earthquake 
+            ORDER BY event_datetime DESC
+          """
           df = con.execute(query).df()
+          con.close()
           
-          # Format for JSON serialization (Fixing Timestamp & Boolean error)
-          # Create a copy to prevent SettingWithCopyWarning
+          # Format for JSON serialization
           df_clean = df.copy()
           
           for col in df_clean.columns:
               # Convert Datetime/Timestamp to String
               if df_clean[col].dtype.kind in ['M', 'm']: 
                   df_clean[col] = df_clean[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-              # Convert Boolean to String 'TRUE'/'FALSE' (GSheet compatible)
+              # Convert Boolean to String 'TRUE'/'FALSE'
               elif df_clean[col].dtype.kind == 'b':
                   df_clean[col] = df_clean[col].astype(str).str.upper()
-              # Convert everything else to string if it's not a basic number
+              # Convert everything else to string
               elif df_clean[col].dtype == 'object':
                   df_clean[col] = df_clean[col].astype(str)
 
@@ -153,27 +200,31 @@ jobs:
           client = gspread.authorize(creds)
           sheet = client.open_by_key(os.environ["SPREADSHEET_ID"]).worksheet("staging")
 
-          # Deduplication Logic (GSheet vs DuckDB)
-          # event_id is the primary key in our staging model (Column A / Index 0)
+          # Deduplication: event_id is primary key (Column A)
           existing_ids = sheet.col_values(1) 
           
           new_rows = []
           for _, row in df_clean.iterrows():
-              # Compare as string to be safe
               if str(row['event_id']) not in existing_ids:
                   new_rows.append(row.values.tolist())
 
-          # Append data if new records exist
+          # Append enriched data
           if new_rows:
               sheet.append_rows(new_rows)
-              print(f"Successfully appended {len(new_rows)} new earthquake records.")
+              print(f"Successfully appended {len(new_rows)} enriched earthquake records.")
+              
+              # Log enrichment metrics
+              enriched_count = len(df_clean[df_clean['province'].notna()])
+              total_count = len(df_clean)
+              enrichment_pct = (enriched_count / total_count * 100) if total_count > 0 else 0
+              print(f"Province enrichment: {enriched_count}/{total_count} ({enrichment_pct:.1f}%)")
           else:
-              print("No new data found. GSheet is already up to date.")
+              print("No new data found. Google Sheet is already up to date.")
           
           PYEOF
 
       # ── Artifacts ────────────────────────────────────────────────────────
-      - name: Upload bronze snapshot (audit trail, 30 hari)
+      - name: Upload bronze snapshot (audit trail, 30 days)
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -181,7 +232,7 @@ jobs:
           path: data/bronze/
           retention-days: 30
 
-      - name: Upload dbt docs (7 hari)
+      - name: Upload dbt docs (7 days)
         uses: actions/upload-artifact@v4
         if: success()
         with:
