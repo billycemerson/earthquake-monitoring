@@ -1,8 +1,60 @@
-warehouse/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv
 .env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# dbt
 dbt_project/bmkg_pipeline/target/
 dbt_project/bmkg_pipeline/dbt_packages/
-dbt_project/profiles/.user.yml
-.DS_Store
+dbt_project/bmkg_pipeline/logs/
+
+# Data
+warehouse/
+data/bronze/
+
+# Google Sheets credentials
+service_account.json
+
+# Reports
+enrichment_report.csv
+enrichment_report_*.csv
