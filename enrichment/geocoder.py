@@ -6,7 +6,7 @@ names using the reverse_geocoder library.
 """
 
 import logging
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Union
 import pandas as pd
 
 try:
@@ -27,7 +27,7 @@ class ProvinceGeocoder:
     Uses the reverse_geocoder library to batch process coordinates
     and extract province (admin1) information.
     
-    Safely handles NA/NaN values and different result structures.
+    Safely handles NA/NaN values and different result structures (dict/tuple).
     """
 
     @staticmethod
@@ -42,8 +42,11 @@ class ProvinceGeocoder:
             return 'Unknown'
         
         # Handle pandas NA/NaN types
-        if pd.isna(value):
-            return 'Unknown'
+        try:
+            if pd.isna(value):
+                return 'Unknown'
+        except (TypeError, ValueError):
+            pass
         
         # Convert to string and clean
         str_val = str(value).strip()
@@ -75,9 +78,14 @@ class ProvinceGeocoder:
             # Call reverse_geocoder
             results = rg.search(coordinates)
             
+            log.info(f"Geocoder returned {len(results)} results")
+            if results:
+                log.debug(f"Sample result type: {type(results[0])}, content: {results[0]}")
+            
             provinces = []
-            for result in results:
+            for i, result in enumerate(results):
                 province = ProvinceGeocoder._extract_province(result)
+                log.debug(f"Result[{i}]: {result} → Province: {province}")
                 provinces.append(province)
             
             log.info(f"Successfully geocoded {len(provinces)} coordinates")
@@ -88,52 +96,67 @@ class ProvinceGeocoder:
             raise
 
     @staticmethod
-    def _extract_province(result) -> str:
+    def _extract_province(result: Union[dict, tuple, list]) -> str:
         """
         Extract province from reverse_geocoder result.
         
-        Handles different possible return formats and NA values.
+        Handles both dict and tuple return formats.
         
         Args:
-            result: A single result from rg.search()
+            result: A single result from rg.search() - can be dict or tuple
             
         Returns:
             Province name as string, or 'Unknown' if not found
         """
-        if not isinstance(result, (list, tuple)):
-            return ProvinceGeocoder._safe_str(result)
-        
-        if len(result) == 0:
+        # Handle dictionary format (most common)
+        if isinstance(result, dict):
+            # Try 'admin1' key first (province)
+            if 'admin1' in result:
+                province = ProvinceGeocoder._safe_str(result['admin1'])
+                if province != 'Unknown':
+                    return province
+            
+            # Try 'name' as fallback
+            if 'name' in result:
+                province = ProvinceGeocoder._safe_str(result['name'])
+                if province != 'Unknown':
+                    return province
+            
+            # Return Unknown if no valid keys found
             return 'Unknown'
         
-        # Try common indices for admin1_name (province)
-        # reverse_geocoder typically: (lat, lon, admin1_code, admin1_name, country_code, country_name)
-        candidates = []
+        # Handle tuple/list format (legacy)
+        if isinstance(result, (list, tuple)):
+            if len(result) == 0:
+                return 'Unknown'
+            
+            candidates = []
+            
+            # Index 3: admin1_name (most common in tuple format)
+            if len(result) > 3:
+                candidates.append(result[3])
+            
+            # Index 1: sometimes province
+            if len(result) > 1:
+                candidates.append(result[1])
+            
+            # Index 2: admin1_code
+            if len(result) > 2:
+                candidates.append(result[2])
+            
+            # Any string elements
+            for item in result:
+                if isinstance(item, str):
+                    candidates.append(item)
+            
+            # Return first non-null candidate
+            for candidate in candidates:
+                province = ProvinceGeocoder._safe_str(candidate)
+                if province != 'Unknown':
+                    return province
         
-        # Index 3: Most common for admin1_name
-        if len(result) > 3:
-            candidates.append(result[3])
-        
-        # Index 1: Sometimes province is here
-        if len(result) > 1:
-            candidates.append(result[1])
-        
-        # Index 2: Try admin1_code as fallback
-        if len(result) > 2:
-            candidates.append(result[2])
-        
-        # Try any other string elements
-        for item in result:
-            if isinstance(item, str):
-                candidates.append(item)
-        
-        # Return first non-null candidate
-        for candidate in candidates:
-            province = ProvinceGeocoder._safe_str(candidate)
-            if province != 'Unknown':
-                return province
-        
-        return 'Unknown'
+        # Fallback: try to convert directly
+        return ProvinceGeocoder._safe_str(result)
 
     @staticmethod
     def geocode_single(latitude: float, longitude: float) -> str:
