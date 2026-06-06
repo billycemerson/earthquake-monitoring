@@ -25,6 +25,8 @@ class ProvinceGeocoder:
     
     Uses the reverse_geocoder library to batch process coordinates
     and extract province (admin1) information.
+    
+    Note: reverse_geocoder returns tuples of (lat, lon, admin1_code, admin1_name, country_code, country_name)
     """
 
     @staticmethod
@@ -45,14 +47,21 @@ class ProvinceGeocoder:
             raise ValueError("Coordinates list cannot be empty")
 
         try:
+            # reverse_geocoder.search returns list of tuples:
+            # (lat, lon, admin1_code, admin1_name, country_code, country_name)
             results = rg.search(coordinates)
+            
+            # Extract admin1_name (province) from each result tuple
+            # Index 3 is the admin1_name (province name)
             provinces = [
-                result[0].get('admin1', 'Unknown') 
+                result[3] if len(result) > 3 and result[3] else 'Unknown' 
                 for result in results
             ]
+            
+            log.info(f"Successfully geocoded {len(provinces)} coordinates")
             return provinces
         except Exception as e:
-            log.error(f"Error during geocoding: {e}")
+            log.error(f"Error during geocoding: {type(e).__name__}: {e}")
             raise
 
     @staticmethod
@@ -68,10 +77,14 @@ class ProvinceGeocoder:
             Province name
         """
         try:
+            # reverse_geocoder returns tuple: (lat, lon, admin1_code, admin1_name, country_code, country_name)
             result = rg.search([(latitude, longitude)])
-            return result[0].get('admin1', 'Unknown')
+            if result and len(result) > 0:
+                admin1_name = result[0][3] if len(result[0]) > 3 else 'Unknown'
+                return admin1_name if admin1_name else 'Unknown'
+            return 'Unknown'
         except Exception as e:
-            log.error(f"Error geocoding ({latitude}, {longitude}): {e}")
+            log.error(f"Error geocoding ({latitude}, {longitude}): {type(e).__name__}: {e}")
             return 'Unknown'
 
     @staticmethod
